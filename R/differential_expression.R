@@ -2063,7 +2063,7 @@ rankSumTestWithCorrelation_mod <- function(index,statistics,correlation=0,df=Inf
 	#n1 <- length(r1)
 	#n2 <- n-n1
 	n1 <- length(r1) * 1.0 # cast to double to avoid overflow
-  n2 <- (n-n1) * 1.0     # cast to double to avoid overflow
+	n2 <- (n-n1) * 1.0     # cast to double to avoid overflow
 	U <- n1*n2 + n1*(n1+1)/2 - sum(r1)
 	mu <- n1*n2/2
 
@@ -2080,9 +2080,14 @@ rankSumTestWithCorrelation_mod <- function(index,statistics,correlation=0,df=Inf
 	dup <- duplicated(r)
 	TIES <- (sum(dup) > 0)
 	if(TIES) {
-    # ignore elements that appear only once.
-    #NTIES <- table(r)
-		NTIES <- table(r[dup]) + 1
+  		# ignore elements that appear only once.
+  		#NTIES <- table(r)
+		uniq <- unique(r[dup])
+		kk <- match(r[dup], uniq)
+		NTIES <- numeric(length(uniq)) + 1
+		for (i in kk) { 
+			NTIES[i] <- NTIES[i] + 1
+		}
 		adjustment <- sum(NTIES*(NTIES+1)*(NTIES-1)) / (n*(n+1)*(n-1))
 		sigma2 <- sigma2 * (1 - adjustment)
 	}
