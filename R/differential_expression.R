@@ -891,64 +891,67 @@ FindMarkers.Seurat <- function(
   return(de.results)
 }
 
-count_cells_rcpp <- function(x, thresh.min, cells) {
+calc_pct_mean_rcpp <- function(x, thresh.min, pseudocount.use, base, cells.1, cells.2) {
   src <-
   '
-  NumericVector count_cells_rcpp0(NumericVector x, IntegerVector index, IntegerVector pointer, 
-                                  NumericVector gene_count, double thresh_min, IntegerVector cells) {
-    int p = 1;
-    int col = 0;
-    for (int i = 0; i < x.length(); i++){
-      while (i >= pointer[p]) {
-        p++;
+  void calc_pct_mean_rcpp0(NumericVector xx, IntegerVector xi, IntegerVector xp, 
+                           NumericVector& row_count1, NumericVector& row_count2, 
+                           NumericVector& row_sum1, NumericVector& row_sum2, 
+                           IntegerVector v_cells1, IntegerVector v_cells2, 
+                           double thresh_min) {
+    for (int p = 0; p < xp.length() - 1; p++) {
+      if (v_cells1[p] == 1) {
+        for (int i = xp[p]; i < xp[p + 1]; i++) {
+          if (xx[i] > thresh_min) {
+            row_count1[xi[i]]++;
+          }
+          row_sum1[xi[i]] += expm1(xx[i]);
+        }
       }
-      while (p > cells[col] && col < cells.length() - 1) {
-        col++;
-      }
-      if (cells[col] == p) {
-        if (x[i] > thresh_min) {
-          gene_count[index[i]]++;
+      if (v_cells2[p] == 1) {
+        for (int i = xp[p]; i < xp[p + 1]; i++) {
+          if (xx[i] > thresh_min) {
+            row_count2[xi[i]]++;
+          }
+          row_sum2[xi[i]] += expm1(xx[i]);
         }
       }
     }
-    return(gene_count);
+    return;
   }
   '
   Rcpp::cppFunction(src)
-  cells <- which(x = colnames(x) %in% cells)
-  gene_count <- numeric(length = nrow(x = x))
-  ret <- count_cells_rcpp0(x = x@x, index = x@i, pointer = x@p, gene_count = gene_count, thresh_min = thresh.min, cells = cells)
-  ret
-}
-
-mean_fxn_rcpp <- function(x, pseudocount.use, base, cells) {
-  #return(log(x = rowMeans(x = expm1(x = x)) + pseudocount.use, base = base))
-  src <-
-  '
-  NumericVector mean_fxn_rcpp0(NumericVector x, IntegerVector index, IntegerVector pointer, 
-                               NumericVector row_sum, IntegerVector cells) {
-    int p = 1;
-    int col = 0;
-    for (int i = 0; i < x.length(); i++){
-      while (i >= pointer[p]) {
-        p++;
-      }
-      while (p > cells[col] && col < cells.length() - 1) {
-        col++;
-      }
-      if (cells[col] == p) {
-        row_sum[index[i]] += expm1(x[i]);
-      }
-    }
-    return row_sum;
-  }
-  '
-  Rcpp::cppFunction(src)
-  cells <- which(x = colnames(x) %in% cells)
-  row_sum <- mean_fxn_rcpp0(x = x@x, index = x@i, pointer = x@p, row_sum = numeric(length = nrow(x)), cells = cells)
-  ret <- log(x = row_sum / length(x = cells) + pseudocount.use, base = base)
-  names(x = ret) <- rownames(x = x)
-  ret
+  v_cells1 <- as.integer(colnames(x) %in% cells.1)
+  v_cells2 <- as.integer(colnames(x) %in% cells.2)
+  row_count1 <- numeric(length = nrow(x = x))
+  row_count2 <- numeric(length = nrow(x = x))
+  row_sum1 <- numeric(length = nrow(x = x))
+  row_sum2 <- numeric(length = nrow(x = x))
+  calc_pct_mean_rcpp0(
+    xx = x@x,
+    xi = x@i,
+    xp = x@p,
+    row_count1 = row_count1,
+    row_count2 = row_count2,
+    row_sum1 = row_sum1,
+    row_sum2 = row_sum2,
+    v_cells1 = v_cells1,
+    v_cells2 = v_cells2, 
+    thresh_min = thresh.min
+  )
+  row_mean1 <- log(x = row_sum1 / length(x = cells.1) + pseudocount.use, base = base)
+  row_mean2 <- log(x = row_sum2 / length(x = cells.2) + pseudocount.use, base = base)
+  pct.1 <- round(
+    x = row_count1 /
+      length(x = cells.1),
+    digits = 3
+  )
+  pct.2 <- round(
+    x = row_count2 /
+      length(x = cells.2),
+    digits = 3
+  )
+  list(pct.1 = pct.1, pct.2 = pct.2, row_mean1 = row_mean1, row_mean2 = row_mean2)
 }
 
 #' @param cells.1 Vector of cell names belonging to group 1
@@ -967,51 +970,55 @@ FoldChange.default <- function(
   mean.fxn,
   fc.name,
   features = NULL,
+  pseudocount.use = pseudocount.use,
+  base = base,
   ...
 ) {
-  features <- features %||% rownames(x = object)
-  thresh.min <- 0
-  # Calculate percent expressed for cells.1
-  if (getOption('Seurat.fc.rcpp', FALSE)) {
+  mean.fxn.check <- identical(
+    mean.fxn, 
+    function(x) {
+      return(log(x = rowMeans(x = expm1(x = x)) + pseudocount.use, base = base))
+    },
+    ignore.environment = TRUE
+  )
+  if (getOption('Seurat.fc.rcpp', FALSE) && is.null(features) && mean.fxn.check == TRUE) {
+    thresh.min <- 0
+    ret <- calc_pct_mean_rcpp(
+      x = object,
+      thresh.min = thresh.min,
+      pseudocount.use = pseudocount.use,
+      base = base,
+      cells.1 = cells.1,
+      cells.2 = cells.2
+    )
+    pct.1 <- ret$pct.1
+    pct.2 <- ret$pct.2
+    data.1 <- ret$row_mean1
+    data.2 <- ret$row_mean2
+    names(pct.1) <- rownames(x = object)
+  } else {
+    features <- features %||% rownames(x = object)
+    # Calculate percent expressed
+    thresh.min <- 0
     pct.1 <- round(
-      x = count_cells_rcpp(x = object, thresh.min = thresh.min, cells = cells.1) /
+      x = rowSums(x = object[features, cells.1, drop = FALSE] > thresh.min) /
         length(x = cells.1),
       digits = 3
     )
-    data.1 <- mean.fxn(object, cells = cells.1)
-  } else {
-    object.1 <- object[features, cells.1, drop = FALSE]
-    pct.1 <- round(
-      x = rowSums(x = object.1 > thresh.min) /
-        length(x = cells.1),
-      digits = 3
-    )
-    data.1 <- mean.fxn(object.1)
-  }
-  # Calculate percent expressed for cells.2
-  if (getOption('Seurat.fc.rcpp', FALSE)) {
     pct.2 <- round(
-      x = count_cells_rcpp(x = object, thresh.min = thresh.min, cells = cells.2) /
+      x = rowSums(x = object[features, cells.2, drop = FALSE] > thresh.min) /
         length(x = cells.2),
       digits = 3
     )
-    data.2 <- mean.fxn(object, cells = cells.2)
-  } else {
-    object.2 <- object[features, cells.2, drop = FALSE]
-    pct.2 <- round(
-      x = rowSums(x = object.2 > thresh.min) /
-        length(x = cells.2),
-      digits = 3
-    )
-    data.2 <- mean.fxn(object.2)
+    # Calculate fold change
+    data.1 <- mean.fxn(object[features, cells.1, drop = FALSE])
+    data.2 <- mean.fxn(object[features, cells.2, drop = FALSE])
   }
-  # Calculate fold change
   fc <- (data.1 - data.2)
   fc.results <- as.data.frame(x = cbind(fc, pct.1, pct.2))
   colnames(fc.results) <- c(fc.name, "pct.1", "pct.2")
   return(fc.results)
 }
-
 
 #' @importFrom Matrix rowMeans
 #' @rdname FoldChange
@@ -1033,15 +1040,9 @@ FoldChange.Assay <- function(
   data <- GetAssayData(object = object, slot = slot)
   mean.fxn <- mean.fxn %||% switch(
     EXPR = slot,
-    'data' = ifelse(
-      test = getOption('Seurat.fc.rcpp', FALSE),
-      yes = function(x, cells) {
-        return(mean_fxn_rcpp(x = x, pseudocount.use = pseudocount.use, base = base, cells = cells))
-      },
-      no = function(x) {
-        return(log(x = rowMeans(x = expm1(x = x)) + pseudocount.use, base = base))
-      }
-    ),
+    'data' = function(x) {
+      return(log(x = rowMeans(x = expm1(x = x)) + pseudocount.use, base = base))
+    },
     'scale.data' = rowMeans,
     function(x) {
       return(log(x = rowMeans(x = x) + pseudocount.use, base = base))
@@ -1064,7 +1065,9 @@ FoldChange.Assay <- function(
     cells.2 = cells.2,
     features = features,
     mean.fxn = mean.fxn,
-    fc.name = fc.name
+    fc.name = fc.name,
+    pseudocount.use = pseudocount.use,
+    base = base
   )
 }
 
@@ -2087,7 +2090,9 @@ WilcoxDETest <- function(
   verbose = TRUE,
   ...
 ) {
-  #data.use <- data.use[, c(cells.1, cells.2), drop = FALSE]
+  if (!all.equal(target = colnames(data.use), current = c(cells.1, cells.2))) {
+    data.use <- data.use[, c(cells.1, cells.2), drop = FALSE]
+  }
   j <- seq_len(length.out = length(x = cells.1))
   my.sapply <- ifelse(
     test = verbose && nbrOfWorkers() == 1,
@@ -2100,20 +2105,22 @@ WilcoxDETest <- function(
     no = TRUE
   )
   limma.check <- PackageCheck("limma", error = FALSE)
-  if (getOption('Seurat.limma.internal', FALSE)) {
-    p_val <- my.sapply(
-      X = 1:nrow(x = data.use),
-      FUN = function(x) {
-        return(min(2 * min(rankSumTestWithCorrelation_sc2(index = j, statistics = data.use[x, ])), 1))
-      }
-    )
-  } else if (getOption('Seurat.limma.internal2', FALSE)) {
-    p_val <- my.sapply(
-      X = 1:nrow(x = data.use),
-      FUN = function(x) {
-        return(min(2 * min(rankSumTestWithCorrelation_sc2(index = j, statistics = data.use[x, ])), 1))
-      }
-    )
+  if (getOption('Seurat.limma.internal', FALSE) || getOption('Seurat.limma.internal2', FALSE)) {
+    if (class(data.use) == "dgCMatrix" && nbrOfWorkers() == 1) {
+      p_val <- my.sapply(
+        X = 1:nrow(x = data.use),
+        FUN = function(x) {
+          return(min(2 * min(rankSumTestWithCorrelation_sc2(index = j, statistics = get_row_rcp(x = data.use, row_num = x), index_ordered = TRUE)), 1))
+        }
+      )
+    } else {
+      p_val <- my.sapply(
+        X = 1:nrow(x = data.use),
+        FUN = function(x) {
+          return(min(2 * min(rankSumTestWithCorrelation_sc2(index = j, statistics = data.use[x, ], index_ordered = TRUE)), 1))
+        }
+      )
+    }
   } else if (limma.check[1] && overflow.check) {
     p_val <- my.sapply(
       X = 1:nrow(x = data.use),
@@ -2149,6 +2156,59 @@ WilcoxDETest <- function(
     )
   }
   return(data.frame(p_val, row.names = rownames(x = data.use)))
+}
+
+get_row_rcp <- function(x, row_num) {
+  src <-
+  '
+  NumericVector get_row_rcpp0(NumericVector xx, IntegerVector xi, IntegerVector xp, 
+                              int n_sample, int row_num, double start_frac) {
+    NumericVector my_row (n_sample);
+    int i, p, flag, start;
+
+    start_frac = start_frac > 1.0 ? 1.0 : start_frac;
+    for (p = 0; p < xp.length() - 1; p++) {
+      flag = 0;
+      start = (int) ((xp[p + 1] - xp[p]) * start_frac) - 1;
+      start = (start < 0) ? 0 : start;
+      if (xi[xp[p] + start] <= row_num) {
+        for (i = xp[p] + start; i < xp[p + 1] && flag == 0; i++) {
+          if (xi[i] >= row_num) {
+            if (xi[i] > row_num) {
+              flag = 1;
+            } else {
+              my_row[p] = xx[i];
+            }
+          }
+        }
+      } else {
+        for (i = xp[p] + start; i >= xp[p]  && flag == 0; i--) {
+          if (xi[i] <= row_num) {
+            if (xi[i] < row_num) {
+              flag = 1;
+            } else {
+              my_row[p] = xx[i];
+            }
+          }
+        }
+      }
+    }
+    return my_row;
+  }
+  '
+  if (row_num <= 0) {
+    stop("row_num need to be greater than 0.")
+  }
+  Rcpp::cppFunction(src)
+  #my_row <- numeric(length = ncol(x = x))
+  #my_row = 1.1
+  #print(object.size(my_row))
+
+  rev <- (row_num > nrow(x) / 2)
+  my_row <- get_row_rcpp0(xx = x@x, xi = x@i, xp = x@p, n_sample = ncol(x), row_num = row_num - 1, start_frac = row_num / nrow(x))
+
+  #names(my_row) <- colnames(x)
+  my_row
 }
 
 # based on rankSumTestWithCorrelation.R in limma_3.48.1.tar.gz
@@ -2206,7 +2266,7 @@ rankSumTestWithCorrelation_sc <- function(index,statistics,correlation=0,df=Inf)
 
 
 # based on rankSumTestWithCorrelation.R in limma_3.48.1.tar.gz
-rankSumTestWithCorrelation_sc2 <- function(index,statistics,correlation=0,df=Inf)
+rankSumTestWithCorrelation_sc2x <- function(index,statistics,correlation=0,df=Inf)
 #  Rank sum test as for two-sample Wilcoxon-Mann-Whitney test,
 #  but allowing for correlation between members of test set.
 #  Gordon Smyth and Di Wu
@@ -2248,6 +2308,68 @@ rankSumTestWithCorrelation_sc2 <- function(index,statistics,correlation=0,df=Inf
   if(TIES) {
     NTIES <- lengths[lengths > 1]
     adjustment <- sum(NTIES*(NTIES+1)*(NTIES-1)) / (n*(n+1)*(n-1))
+    sigma2 <- sigma2 * (1 - adjustment)
+  }
+  zlowertail <- (U+0.5-mu)/sqrt(sigma2)
+  zuppertail <- (U-0.5-mu)/sqrt(sigma2)
+
+#  Lower and upper tails are reversed on output
+#  because R's ranks are the reverse of Mann-Whitney's ranks
+  pvalues <- c(less=pt(zuppertail,df=df,lower.tail=FALSE), greater=pt(zlowertail,df=df))
+  return(pvalues)
+}
+
+
+# based on rankSumTestWithCorrelation.R in limma_3.48.1.tar.gz
+rankSumTestWithCorrelation_sc2 <- function(index,statistics,correlation=0,df=Inf,index_ordered=FALSE)
+#  Rank sum test as for two-sample Wilcoxon-Mann-Whitney test,
+#  but allowing for correlation between members of test set.
+#  Gordon Smyth and Di Wu
+#  Created 2007.  Last modified 24 Feb 2012.
+{
+  # Alternative implementation of sort(rank(x, ties.method = "average")).
+  # Cells with the smallest count (typically 0) is excluded in order() and
+  # rle() to speed up counting ties.
+  min_s <- (statistics == min(statistics))
+  n_min_s <- sum(min_s)
+  s2 <- statistics[!min_s]
+  ord <- order(s2)
+  tab <- rle(s2[ord])
+  lengths <- tab$lengths
+
+  # create a table of average ranks with ties
+  average_rank_table <- cumsum(lengths) - (lengths - 1) * 0.5 + n_min_s
+  #stopifnot(all.equal(rep(avarage_rank_table, lengths), sort(rank(statistics)))) 
+  # xxx
+  r <- rep(average_rank_table, lengths)
+
+  if (index_ordered) {
+    r1 <- r[order(ord)[seq_len(sum(!min_s[index]))]]
+  } else {
+    index2 <- logical(length(statistics))
+    index2[index] <- TRUE
+    index2 <- index2[!min_s]
+    r1 <- r[index2[ord]]
+  }
+
+  # convert n and n1 into double to avoid overflow
+  n <- length(statistics) * 1.0
+  n1 <- length(index) * 1.0
+  n2 <- (n-n1)
+  U <- n1*n2 + n1*(n1+1)/2 - sum(r1) - (n_min_s + 1) * 0.5 * sum(min_s[index])
+  mu <- n1*n2/2
+
+  if(correlation==0 || n1==1) {
+    sigma2 <- n1*n2*(n+1)/12
+  } else {
+    sigma2 <- asin(1)*n1*n2 + asin(0.5)*n1*n2*(n2-1) + asin(correlation/2)*n1*(n1-1)*n2*(n2-1) + asin((correlation+1)/2)*n1*(n1-1)*n2
+    sigma2 <- sigma2/2/pi
+  }
+
+  TIES <- (n_min_s != 1) || !all(lengths == 1)
+  if(TIES) {
+    NTIES <- lengths
+    adjustment <- (n_min_s ^ 3 - n_min_s + sum(NTIES*(NTIES+1)*(NTIES-1))) / (n*(n+1)*(n-1))
     sigma2 <- sigma2 * (1 - adjustment)
   }
   zlowertail <- (U+0.5-mu)/sqrt(sigma2)
