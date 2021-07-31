@@ -2099,12 +2099,6 @@ WilcoxDETest <- function(
     yes = pbsapply,
     no = future_sapply
   )
-  overflow.check <- ifelse(
-    test = is.na(x = suppressWarnings(length(x = data.use[1, ]) * length(x = data.use[1, ]))),
-    yes = FALSE,
-    no = TRUE
-  )
-  limma.check <- PackageCheck("limma", error = FALSE)
   if (getOption('Seurat.limma.internal', FALSE) || getOption('Seurat.limma.internal2', FALSE)) {
     if (class(data.use) == "dgCMatrix" && nbrOfWorkers() == 1) {
       p_val <- my.sapply(
@@ -2129,6 +2123,12 @@ WilcoxDETest <- function(
       }
     )
   } else {
+    overflow.check <- ifelse(
+      test = is.na(x = suppressWarnings(length(x = data.use[1, ]) * length(x = data.use[1, ]))),
+      yes = FALSE,
+      no = TRUE
+    )
+    limma.check <- PackageCheck("limma", error = FALSE)
     if (getOption('Seurat.limma.wilcox.msg', TRUE) && overflow.check) {
       message(
         "For a more efficient implementation of the Wilcoxon Rank Sum Test,",
@@ -2162,35 +2162,30 @@ get_row_rcp <- function(x, row_num) {
   src <-
   '
   NumericVector get_row_rcpp0(NumericVector xx, IntegerVector xi, IntegerVector xp, 
-                              int n_sample, int row_num, double start_frac) {
+                              int n_sample, int row_num) {
     NumericVector my_row (n_sample);
-    int i, p, flag, start;
+    int p, left, right, middle, found;
 
-    start_frac = start_frac > 1.0 ? 1.0 : start_frac;
     for (p = 0; p < xp.length() - 1; p++) {
-      flag = 0;
-      start = (int) ((xp[p + 1] - xp[p]) * start_frac) - 1;
-      start = (start < 0) ? 0 : start;
-      if (xi[xp[p] + start] <= row_num) {
-        for (i = xp[p] + start; i < xp[p + 1] && flag == 0; i++) {
-          if (xi[i] >= row_num) {
-            if (xi[i] > row_num) {
-              flag = 1;
-            } else {
-              my_row[p] = xx[i];
-            }
-          }
+      // binary search
+      left = xp[p];
+      right = xp[p + 1] - 1;
+      middle = right + (left - right) / 2;
+      found = 0;
+
+      while (left <= right) {
+        if (xi[middle] < row_num) {
+          left = middle + 1;
+        } else if (xi[middle] > row_num) {
+          right = middle - 1;
+        } else {
+          found = 1;
+          break;
         }
-      } else {
-        for (i = xp[p] + start; i >= xp[p]  && flag == 0; i--) {
-          if (xi[i] <= row_num) {
-            if (xi[i] < row_num) {
-              flag = 1;
-            } else {
-              my_row[p] = xx[i];
-            }
-          }
-        }
+        middle = (left + right) / 2;
+      }
+      if (found == 1) {
+        my_row[p] = xx[middle];
       }
     }
     return my_row;
@@ -2200,16 +2195,10 @@ get_row_rcp <- function(x, row_num) {
     stop("row_num need to be greater than 0.")
   }
   Rcpp::cppFunction(src)
-  #my_row <- numeric(length = ncol(x = x))
-  #my_row = 1.1
-  #print(object.size(my_row))
-
-  rev <- (row_num > nrow(x) / 2)
-  my_row <- get_row_rcpp0(xx = x@x, xi = x@i, xp = x@p, n_sample = ncol(x), row_num = row_num - 1, start_frac = row_num / nrow(x))
-
-  #names(my_row) <- colnames(x)
+  my_row <- get_row_rcpp0(xx = x@x, xi = x@i, xp = x@p, n_sample = ncol(x), row_num = row_num - 1)
   my_row
 }
+
 
 # based on rankSumTestWithCorrelation.R in limma_3.48.1.tar.gz
 rankSumTestWithCorrelation_sc <- function(index,statistics,correlation=0,df=Inf)
@@ -2330,25 +2319,31 @@ rankSumTestWithCorrelation_sc2 <- function(index,statistics,correlation=0,df=Inf
   # Alternative implementation of sort(rank(x, ties.method = "average")).
   # Cells with the smallest count (typically 0) is excluded in order() and
   # rle() to speed up counting ties.
-  min_s <- (statistics == min(statistics))
-  n_min_s <- sum(min_s)
-  s2 <- statistics[!min_s]
+  min_s <- min(statistics)
+  s_gt_min <- (statistics > min_s)
+  n_min <- length(statistics) - sum(s_gt_min)
+  s2 <- statistics[s_gt_min]
   ord <- order(s2)
   tab <- rle(s2[ord])
   lengths <- tab$lengths
 
   # create a table of average ranks with ties
-  average_rank_table <- cumsum(lengths) - (lengths - 1) * 0.5 + n_min_s
-  #stopifnot(all.equal(rep(avarage_rank_table, lengths), sort(rank(statistics)))) 
-  # xxx
-  r <- rep(average_rank_table, lengths)
+  average_rank_table <- cumsum(lengths) - (lengths - 1) * 0.5 + n_min
 
+  # debug
+  #tmp <- sort(rank(statistics[statistics > min(statistics)])) +  sum(statistics == min(statistics))
+  #stopifnot(all.equal(rep(average_rank_table, lengths), tmp))
+
+  r <- rep(average_rank_table, lengths)
+  si <- statistics[index]
+  si_gt_min <- (si > min_s)
+  sum_si_gt_min <- sum(si_gt_min)
   if (index_ordered) {
-    r1 <- r[order(ord)[seq_len(sum(!min_s[index]))]]
+    r1 <- r[order(ord)[seq_len(sum_si_gt_min)]]
   } else {
     index2 <- logical(length(statistics))
     index2[index] <- TRUE
-    index2 <- index2[!min_s]
+    index2 <- index2[s_gt_min]
     r1 <- r[index2[ord]]
   }
 
@@ -2356,7 +2351,7 @@ rankSumTestWithCorrelation_sc2 <- function(index,statistics,correlation=0,df=Inf
   n <- length(statistics) * 1.0
   n1 <- length(index) * 1.0
   n2 <- (n-n1)
-  U <- n1*n2 + n1*(n1+1)/2 - sum(r1) - (n_min_s + 1) * 0.5 * sum(min_s[index])
+  U <- n1*n2 + n1*(n1+1)/2 - sum(r1) - (n_min + 1) * 0.5 * (length(index) - sum_si_gt_min)
   mu <- n1*n2/2
 
   if(correlation==0 || n1==1) {
@@ -2366,10 +2361,10 @@ rankSumTestWithCorrelation_sc2 <- function(index,statistics,correlation=0,df=Inf
     sigma2 <- sigma2/2/pi
   }
 
-  TIES <- (n_min_s != 1) || !all(lengths == 1)
+  TIES <- (n_min != 1) || !all(lengths == 1)
   if(TIES) {
     NTIES <- lengths
-    adjustment <- (n_min_s ^ 3 - n_min_s + sum(NTIES*(NTIES+1)*(NTIES-1))) / (n*(n+1)*(n-1))
+    adjustment <- (n_min ^ 3 - n_min + sum(NTIES*(NTIES+1)*(NTIES-1))) / (n*(n+1)*(n-1))
     sigma2 <- sigma2 * (1 - adjustment)
   }
   zlowertail <- (U+0.5-mu)/sqrt(sigma2)
