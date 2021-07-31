@@ -2099,6 +2099,7 @@ WilcoxDETest <- function(
     yes = pbsapply,
     no = future_sapply
   )
+  limma.check <- PackageCheck("limma", error = FALSE)
   if (getOption('Seurat.limma.internal', FALSE) || getOption('Seurat.limma.internal2', FALSE)) {
     if (class(data.use) == "dgCMatrix" && nbrOfWorkers() == 1) {
       p_val <- my.sapply(
@@ -2128,7 +2129,6 @@ WilcoxDETest <- function(
       yes = FALSE,
       no = TRUE
     )
-    limma.check <- PackageCheck("limma", error = FALSE)
     if (getOption('Seurat.limma.wilcox.msg', TRUE) && overflow.check) {
       message(
         "For a more efficient implementation of the Wilcoxon Rank Sum Test,",
